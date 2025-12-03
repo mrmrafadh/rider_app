@@ -13,11 +13,11 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 
 # Database configuration (PostgreSQL)
 DB_CONFIG = {
-    'host': 'localhost',      # or Azure host
+    'host': 'riderdb.postgres.database.azure.com',      # or Azure host
     'port': 5432,
     'database': 'rider_info',
-    'user': 'riderapp',
-    'password': 'StrongPass123'
+    'user': 'rafath',
+    'password': 'Picasa12.'
 }
 
 # Active riders dictionary to track Socket.IO connections
