@@ -1,3 +1,7 @@
+# IMPORTANT: Add eventlet monkey patching FIRST
+import eventlet
+eventlet.monkey_patch()
+
 from flask import Flask, request, jsonify
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
@@ -7,17 +11,17 @@ from datetime import datetime
 import os
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'your-secret-key-here'
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-here')
 CORS(app)
-socketio = SocketIO(app, cors_allowed_origins="*")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
-# Database configuration (PostgreSQL)
+# Database configuration (PostgreSQL) - Use environment variables for security
 DB_CONFIG = {
-    'host': 'riderdb.postgres.database.azure.com',      # or Azure host
-    'port': 5432,
-    'database': 'postgres',
-    'user': 'rafath',
-    'password': 'Picasa12.'
+    'host': os.environ.get('DB_HOST', 'riderdb.postgres.database.azure.com'),
+    'port': int(os.environ.get('DB_PORT', 5432)),
+    'database': os.environ.get('DB_NAME', 'postgres'),
+    'user': os.environ.get('DB_USER', 'rafath'),
+    'password': os.environ.get('DB_PASSWORD', 'Picasa12.')
 }
 
 # Active riders dictionary to track Socket.IO connections
@@ -277,6 +281,12 @@ def handle_disconnect():
     if rider_id:
         del active_riders[rider_id]
         print(f'Rider {rider_id} disconnected')
+        # Emit offline status
+        socketio.emit('rider_status_changed', {
+            'rider_id': rider_id,
+            'is_online': False,
+            'timestamp': datetime.now().isoformat()
+        }, broadcast=True)
 
 @socketio.on('rider_online')
 def handle_rider_online(data):
@@ -315,8 +325,24 @@ def handle_location_update(data):
 
 @app.route('/')
 def index():
-    return jsonify({'status': 'running', 'message': 'Rider API Server is running', 'active_riders': len(active_riders)})
+    return jsonify({
+        'status': 'running',
+        'message': 'Rider API Server is running',
+        'active_riders': len(active_riders),
+        'version': '1.0'
+    })
+
+@app.route('/health')
+def health_check():
+    """Health check endpoint for Azure App Service"""
+    return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()}), 200
+
+# ==================== AZURE APP SERVICE FIXES ====================
+# This variable is required for Azure App Service to find the Flask app
+# When gunicorn runs with rider_backend:application, it looks for this variable
+application = app
 
 if __name__ == '__main__':
     print("Starting Rider API Server...")
+    # For local development
     socketio.run(app, host='0.0.0.0', port=5000, debug=True, allow_unsafe_werkzeug=True)
