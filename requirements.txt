@@ -4,3 +4,4 @@ Flask-CORS==5.0.0
 mysql-connector-python==9.1.0
 gunicorn==22.0.0
 eventlet==0.36.1
+psycopg2==2.9.9
