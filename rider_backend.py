@@ -15,7 +15,7 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 DB_CONFIG = {
     'host': 'riderdb.postgres.database.azure.com',      # or Azure host
     'port': 5432,
-    'database': 'rider_info',
+    'database': 'postgres',
     'user': 'rafath',
     'password': 'Picasa12.'
 }
