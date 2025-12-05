@@ -100,7 +100,7 @@ def update_status():
     try:
         data = request.get_json()
         rider_id = data.get('rider_id')
-        is_online = data.get('is_online')
+        is_online = bool(data.get('is_online'))
 
         if rider_id is None or is_online is None:
             return jsonify({'success': False, 'message': 'Rider ID and status are required'}), 400
