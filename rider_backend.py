@@ -33,7 +33,7 @@ active_riders = {}
 def get_db_connection():
     """Create and return a PostgreSQL database connection"""
     try:
-        connection = psycopg2.connect(**DB_CONFIG, cursor_factory=RealDictCursor)
+        connection = psycopg2.connect(**DB_CONFIG, cursor_factory=RealDictCursor, sslmode='require')
         print("rafath")
         return connection
     except Exception as e:
