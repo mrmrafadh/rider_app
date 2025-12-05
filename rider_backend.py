@@ -32,6 +32,7 @@ def get_db_connection():
     """Create and return a PostgreSQL database connection"""
     try:
         connection = psycopg2.connect(**DB_CONFIG, cursor_factory=RealDictCursor)
+        print("rafath")
         return connection
     except Exception as e:
         print(f"Error connecting to PostgreSQL: {e}")
