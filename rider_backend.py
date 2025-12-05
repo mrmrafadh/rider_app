@@ -97,13 +97,22 @@ def login():
 @app.route('/api/update_status', methods=['POST'])
 def update_status():
     """Update rider online/offline status"""
+    connection = None
+    cursor = None
     try:
         data = request.get_json()
         rider_id = data.get('rider_id')
-        is_online = bool(data.get('is_online'))
+        is_online = data.get('is_online')
 
-        if rider_id is None or is_online is None:
-            return jsonify({'success': False, 'message': 'Rider ID and status are required'}), 400
+        # Validate input
+        if rider_id is None:
+            return jsonify({'success': False, 'message': 'Rider ID is required'}), 400
+
+        if is_online is None:
+            return jsonify({'success': False, 'message': 'Status is required'}), 400
+
+        # Convert to boolean (handles 'true', 'false', 1, 0, True, False)
+        is_online = bool(is_online) if isinstance(is_online, bool) else str(is_online).lower() == 'true'
 
         connection = get_db_connection()
         if not connection:
@@ -111,25 +120,27 @@ def update_status():
 
         cursor = connection.cursor()
 
-        # Check if status record exists
-        cursor.execute("SELECT status_id FROM rider_status WHERE rider_id = %s", (rider_id,))
-        existing = cursor.fetchone()
+        # Verify rider exists
+        cursor.execute("SELECT rider_id FROM riders WHERE rider_id = %s", (rider_id,))
+        rider_exists = cursor.fetchone()
 
-        if existing:
-            # Update existing status
-            cursor.execute("""
-                UPDATE rider_status
-                SET is_online = %s, last_updated = NOW()
-                WHERE rider_id = %s
-            """, (is_online, rider_id))
-        else:
-            # Insert new status
-            cursor.execute("""
-                INSERT INTO rider_status (rider_id, is_online)
-                VALUES (%s, %s)
-            """, (rider_id, is_online))
+        if not rider_exists:
+            close_db_connection(connection, cursor)
+            return jsonify({'success': False, 'message': 'Rider not found'}), 404
+
+        # Use INSERT ... ON CONFLICT for upsert (requires unique constraint on rider_id)
+        cursor.execute("""
+            INSERT INTO rider_status (rider_id, is_online, last_updated)
+            VALUES (%s, %s, NOW())
+            ON CONFLICT (rider_id)
+            DO UPDATE SET
+                is_online = EXCLUDED.is_online,
+                last_updated = NOW()
+        """, (rider_id, is_online))
 
         connection.commit()
+
+        print(f"✓ Status updated for rider {rider_id}: is_online={is_online}")
 
         # Emit status change to all connected clients
         socketio.emit('rider_status_changed', {
@@ -139,11 +150,40 @@ def update_status():
         })
 
         close_db_connection(connection, cursor)
-        return jsonify({'success': True, 'message': 'Status updated successfully'}), 200
+        return jsonify({
+            'success': True,
+            'message': 'Status updated successfully',
+            'rider_id': rider_id,
+            'is_online': is_online
+        }), 200
+
+    except psycopg2.Error as e:
+        if connection:
+            connection.rollback()
+        print(f"=== DATABASE ERROR in update_status ===")
+        print(f"Error: {e}")
+        print(f"Error code: {e.pgcode}")
+        print(f"Error message: {e.pgerror}")
+        print(f"Rider ID: {rider_id if 'rider_id' in locals() else 'N/A'}")
+        close_db_connection(connection, cursor)
+        return jsonify({
+            'success': False,
+            'message': f'Database error: {str(e)}'
+        }), 500
 
     except Exception as e:
-        print(f"Update status error: {e}")
-        return jsonify({'success': False, 'message': f'Server error: {str(e)}'}), 500
+        if connection:
+            connection.rollback()
+        print(f"=== GENERAL ERROR in update_status ===")
+        print(f"Error: {e}")
+        print(f"Error type: {type(e).__name__}")
+        import traceback
+        traceback.print_exc()
+        close_db_connection(connection, cursor)
+        return jsonify({
+            'success': False,
+            'message': f'Server error: {str(e)}'
+        }), 500
 
 
 @app.route('/api/update_location', methods=['POST'])
