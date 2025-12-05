@@ -9,19 +9,21 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from datetime import datetime
 import os
+from dotenv import load_dotenv
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-here')
+
 CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
-# Database configuration (PostgreSQL) - Use environment variables for security
+load_dotenv()  # loads variables from .env
+
 DB_CONFIG = {
-    'host': os.environ.get('DB_HOST', 'riderdb.postgres.database.azure.com'),
+    'host': os.environ.get('DB_HOST'),
     'port': int(os.environ.get('DB_PORT', 5432)),
-    'database': os.environ.get('DB_NAME', 'postgres'),
-    'user': os.environ.get('DB_USER', 'rafath'),
-    'password': os.environ.get('DB_PASSWORD', 'Picasa12.')
+    'database': os.environ.get('DB_NAME'),
+    'user': os.environ.get('DB_USER'),
+    'password': os.environ.get('DB_PASSWORD')
 }
 
 # Active riders dictionary to track Socket.IO connections
