@@ -111,90 +111,87 @@ def login():
 
 @app.route('/api/update_status', methods=['POST'])
 def update_status():
-    """Update rider online/offline status"""
-    connection = None
-    cursor = None
     try:
         data = request.get_json()
+        print(f"[DEBUG UPDATE_STATUS] Request data: {data}")
+
         rider_id = data.get('rider_id')
-        is_online = data.get('is_online')
+        is_online_param = data.get('is_online')
 
-        # Validate input
+        print(f"[DEBUG] rider_id: {rider_id}, is_online_param: {is_online_param}, type: {type(is_online_param)}")
+
         if rider_id is None:
-            return jsonify({'success': False, 'message': 'Rider ID is required'}), 400
+            return jsonify({'success': False, 'message': 'Missing rider_id'}), 400
 
-        if is_online is None:
-            return jsonify({'success': False, 'message': 'Status is required'}), 400
+        if is_online_param is None:
+            return jsonify({'success': False, 'message': 'Missing is_online'}), 400
 
-        # Convert to boolean (handles 'true', 'false', 1, 0, True, False)
-        is_online = bool(is_online) if isinstance(is_online, bool) else str(is_online).lower() == 'true'
+        # Convert to boolean - handle both integer and string
+        if isinstance(is_online_param, int):
+            is_online_bool = True if is_online_param == 1 else False
+        elif isinstance(is_online_param, str):
+            is_online_bool = True if is_online_param.lower() in ['true', '1', 'yes'] else False
+        else:
+            is_online_bool = bool(is_online_param)
 
-        connection = get_db_connection()
-        if not connection:
-            return jsonify({'success': False, 'message': 'Database connection failed'}), 500
+        print(f"[DEBUG] Converted is_online_bool: {is_online_bool}")
 
-        cursor = connection.cursor()
+        conn = get_db_connection()
+        cursor = conn.cursor()
 
-        # Verify rider exists
-        cursor.execute("SELECT rider_id FROM riders WHERE rider_id = %s", (rider_id,))
-        rider_exists = cursor.fetchone()
+        # First, check current status
+        cursor.execute("SELECT rider_name, is_online FROM riders WHERE rider_id = %s", (rider_id,))
+        current_data = cursor.fetchone()
 
-        if not rider_exists:
-            close_db_connection(connection, cursor)
+        if not current_data:
+            cursor.close()
+            conn.close()
             return jsonify({'success': False, 'message': 'Rider not found'}), 404
 
-        # Use INSERT ... ON CONFLICT for upsert (requires unique constraint on rider_id)
-        cursor.execute("""
-            INSERT INTO rider_status (rider_id, is_online, last_updated)
-            VALUES (%s, %s, NOW())
-            ON CONFLICT (rider_id)
-            DO UPDATE SET
-                is_online = EXCLUDED.is_online,
-                last_updated = NOW()
-        """, (rider_id, is_online))
+        print(f"[DEBUG] Current data: {current_data}")
 
-        connection.commit()
+        # Update the status
+        update_query = """
+        UPDATE riders 
+        SET is_online = %s, 
+            last_activity = NOW()
+        WHERE rider_id = %s
+        RETURNING rider_id, rider_name, is_online;
+        """
 
-        print(f"✓ Status updated for rider {rider_id}: is_online={is_online}")
+        print(f"[DEBUG] Executing: {update_query}")
+        print(f"[DEBUG] With values: ({is_online_bool}, {rider_id})")
 
-        # Emit status change to all connected clients
-        socketio.emit('rider_status_changed', {
-            'rider_id': rider_id,
-            'is_online': is_online,
-            'timestamp': datetime.now().isoformat()
-        })
+        cursor.execute(update_query, (is_online_bool, rider_id))
+        updated_row = cursor.fetchone()
 
-        close_db_connection(connection, cursor)
-        return jsonify({
-            'success': True,
-            'message': 'Status updated successfully',
-            'rider_id': rider_id,
-            'is_online': is_online
-        }), 200
+        print(f"[DEBUG] Updated row: {updated_row}")
 
-    except psycopg2.Error as e:
-        if connection:
-            connection.rollback()
-        print(f"=== DATABASE ERROR in update_status ===")
-        print(f"Error: {e}")
-        print(f"Error code: {e.pgcode}")
-        print(f"Error message: {e.pgerror}")
-        print(f"Rider ID: {rider_id if 'rider_id' in locals() else 'N/A'}")
-        close_db_connection(connection, cursor)
-        return jsonify({
-            'success': False,
-            'message': f'Database error: {str(e)}'
-        }), 500
+        conn.commit()
+
+        # Verify the update
+        cursor.execute("SELECT rider_name, is_online FROM riders WHERE rider_id = %s", (rider_id,))
+        verified_data = cursor.fetchone()
+        print(f"[DEBUG] Verified data after update: {verified_data}")
+
+        cursor.close()
+        conn.close()
+
+        if updated_row:
+            return jsonify({
+                'success': True,
+                'message': f"Status updated to {'online' if is_online_bool else 'offline'}",
+                'rider_id': updated_row['rider_id'],
+                'rider_name': updated_row['rider_name'],
+                'is_online': updated_row['is_online']
+            })
+        else:
+            return jsonify({'success': False, 'message': 'Update failed - no rows affected'}), 500
 
     except Exception as e:
-        if connection:
-            connection.rollback()
-        print(f"=== GENERAL ERROR in update_status ===")
-        print(f"Error: {e}")
-        print(f"Error type: {type(e).__name__}")
+        print(f"[ERROR] Exception in update_status: {str(e)}")
         import traceback
         traceback.print_exc()
-        close_db_connection(connection, cursor)
         return jsonify({
             'success': False,
             'message': f'Server error: {str(e)}'
@@ -277,52 +274,82 @@ def get_rider_location(rider_id):
 
 @app.route('/api/riders/online', methods=['GET'])
 def get_online_riders():
-    """Get all online riders with their latest locations"""
     try:
-        connection = get_db_connection()
-        if not connection:
-            return jsonify({'success': False, 'message': 'Database connection failed'}), 500
+        print("[DEBUG GET_ONLINE_RIDERS] Received request")
 
-        cursor = connection.cursor()
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # First, check if the riders table has is_online column
         cursor.execute("""
-            SELECT
-                r.rider_id,
-                r.rider_name,
-                rs.is_online,
-                rs.last_updated,
-                (SELECT latitude FROM rider_location
-                 WHERE rider_id = r.rider_id
-                 ORDER BY location_time DESC LIMIT 1) as latitude,
-                (SELECT longitude FROM rider_location
-                 WHERE rider_id = r.rider_id
-                 ORDER BY location_time DESC LIMIT 1) as longitude,
-                (SELECT location_time FROM rider_location
-                 WHERE rider_id = r.rider_id
-                 ORDER BY location_time DESC LIMIT 1) as last_location_time
-            FROM riders r
-            LEFT JOIN rider_status rs ON r.rider_id = rs.rider_id
-            WHERE rs.is_online = TRUE
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name = 'riders' AND column_name = 'is_online';
         """)
+        has_is_online = cursor.fetchone()
+        print(f"[DEBUG] Has is_online column: {has_is_online}")
+
+        # Simple query to get all online riders
+        query = """
+        SELECT 
+            rider_id,
+            rider_name,
+            is_online,
+            last_activity
+        FROM riders 
+        WHERE is_online = TRUE
+        ORDER BY rider_id;
+        """
+
+        print(f"[DEBUG] Executing query: {query}")
+        cursor.execute(query)
         riders = cursor.fetchall()
-        close_db_connection(connection, cursor)
 
+        print(f"[DEBUG] Found {len(riders)} online riders")
         for rider in riders:
-            if rider['latitude']:
-                rider['latitude'] = float(rider['latitude'])
-            if rider['longitude']:
-                rider['longitude'] = float(rider['longitude'])
-            if rider['last_updated']:
-                rider['last_updated'] = rider['last_updated'].isoformat()
-            if rider['last_location_time']:
-                rider['last_location_time'] = rider['last_location_time'].isoformat()
+            print(f"[DEBUG] Rider: {rider}")
 
-        logger.info(f"riders: {riders}")
+        # Get locations for these riders
+        riders_with_locations = []
+        for rider in riders:
+            # Get latest location for each rider
+            cursor.execute("""
+                SELECT latitude, longitude, last_updated
+                FROM rider_locations 
+                WHERE rider_id = %s
+                ORDER BY last_updated DESC
+                LIMIT 1;
+            """, (rider['rider_id'],))
 
-        return jsonify({'success': True, 'count': len(riders), 'riders': riders}), 200
+            location = cursor.fetchone()
+
+            riders_with_locations.append({
+                'rider_id': rider['rider_id'],
+                'rider_name': rider['rider_name'],
+                'latitude': float(location['latitude']) if location and location['latitude'] else None,
+                'longitude': float(location['longitude']) if location and location['longitude'] else None,
+                'last_updated': location['last_updated'].isoformat() if location and location['last_updated'] else None,
+                'is_online': rider['is_online'],
+                'last_activity': rider['last_activity'].isoformat() if rider['last_activity'] else None
+            })
+
+        cursor.close()
+        conn.close()
+
+        return jsonify({
+            'success': True,
+            'count': len(riders_with_locations),
+            'riders': riders_with_locations
+        })
 
     except Exception as e:
-        print(f"Get online riders error: {e}")
-        return jsonify({'success': False, 'message': f'Server error: {str(e)}'}), 500
+        print(f"[ERROR] Exception in get_online_riders: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'message': f'Server error: {str(e)}'
+        }), 500
 
 # ------------------- Socket.IO Events ------------------- #
 
