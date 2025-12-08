@@ -301,6 +301,8 @@ def get_online_riders():
             if rider['last_location_time']:
                 rider['last_location_time'] = rider['last_location_time'].isoformat()
 
+        print("riders: ", riders)
+
         return jsonify({'success': True, 'count': len(riders), 'riders': riders}), 200
 
     except Exception as e:
