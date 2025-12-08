@@ -10,6 +10,21 @@ from psycopg2.extras import RealDictCursor
 from datetime import datetime
 import os
 from dotenv import load_dotenv
+import logging
+import sys
+# In your main Python file (app.py, main.py, etc.)
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),  # This sends to Azure logs
+        logging.FileHandler('app.log')      # Optional: local file
+    ]
+)
+
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
@@ -301,7 +316,7 @@ def get_online_riders():
             if rider['last_location_time']:
                 rider['last_location_time'] = rider['last_location_time'].isoformat()
 
-        print("riders: ", riders)
+        logger.info("riders: ", riders)
 
         return jsonify({'success': True, 'count': len(riders), 'riders': riders}), 200
 
