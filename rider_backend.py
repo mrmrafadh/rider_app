@@ -220,7 +220,7 @@ def update_status():
 
 @app.route('/api/update_location', methods=['POST'])
 def update_location():
-    """Update rider location"""
+    """Update rider location - upsert with device timestamp"""
     connection = None
     cursor = None
     try:
@@ -228,11 +228,12 @@ def update_location():
         rider_id = data.get('rider_id')
         latitude = data.get('latitude')
         longitude = data.get('longitude')
+        device_timestamp = data.get('timestamp')  # Get device timestamp from request
 
         if rider_id is None or latitude is None or longitude is None:
             return jsonify({'success': False, 'message': 'Rider ID, latitude, and longitude are required'}), 400
 
-        # FIX 4: Validate latitude and longitude ranges
+        # Validate latitude and longitude ranges
         try:
             lat = float(latitude)
             lng = float(longitude)
@@ -241,33 +242,74 @@ def update_location():
         except (ValueError, TypeError):
             return jsonify({'success': False, 'message': 'Latitude and longitude must be valid numbers'}), 400
 
+        # Parse device timestamp or use current time
+        location_time = None
+        if device_timestamp:
+            try:
+                # Parse ISO 8601 timestamp from device
+                location_time = datetime.fromisoformat(device_timestamp.replace('Z', '+00:00'))
+            except (ValueError, AttributeError):
+                logger.warning(f"Invalid timestamp format: {device_timestamp}, using server time")
+                location_time = datetime.now()
+        else:
+            location_time = datetime.now()
+
         connection = get_db_connection()
         if not connection:
             return jsonify({'success': False, 'message': 'Database connection failed'}), 500
 
         cursor = connection.cursor()
 
-        # FIX 5: Verify rider exists before inserting location
+        # Verify rider exists
         cursor.execute("SELECT rider_id FROM riders WHERE rider_id = %s", (rider_id,))
         if not cursor.fetchone():
             close_db_connection(connection, cursor)
             return jsonify({'success': False, 'message': 'Rider not found'}), 404
 
+        # Check if location record exists for this rider
         cursor.execute("""
-            INSERT INTO rider_location (rider_id, latitude, longitude, location_time)
-            VALUES (%s, %s, %s, NOW())
-        """, (rider_id, lat, lng))
+            SELECT location_id FROM rider_location 
+            WHERE rider_id = %s 
+            ORDER BY location_time DESC 
+            LIMIT 1
+        """, (rider_id,))
+
+        existing_location = cursor.fetchone()
+
+        if existing_location:
+            # UPDATE existing record with latest location
+            cursor.execute("""
+                UPDATE rider_location 
+                SET latitude = %s, 
+                    longitude = %s, 
+                    location_time = %s
+                WHERE location_id = %s
+            """, (lat, lng, location_time, existing_location['location_id']))
+            logger.info(f"Updated location for rider {rider_id}")
+        else:
+            # INSERT new record (first time for this rider)
+            cursor.execute("""
+                INSERT INTO rider_location (rider_id, latitude, longitude, location_time)
+                VALUES (%s, %s, %s, %s)
+            """, (rider_id, lat, lng, location_time))
+            logger.info(f"Inserted first location for rider {rider_id}")
+
         connection.commit()
 
+        # Emit Socket.IO event with device timestamp
         socketio.emit('rider_location_updated', {
             'rider_id': rider_id,
             'latitude': lat,
             'longitude': lng,
-            'timestamp': datetime.now().isoformat()
+            'timestamp': location_time.isoformat()
         })
 
         close_db_connection(connection, cursor)
-        return jsonify({'success': True, 'message': 'Location updated successfully'}), 200
+        return jsonify({
+            'success': True,
+            'message': 'Location updated successfully',
+            'timestamp': location_time.isoformat()
+        }), 200
 
     except psycopg2.Error as e:
         if connection:
