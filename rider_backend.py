@@ -13,6 +13,7 @@ import os
 from dotenv import load_dotenv
 import logging
 import sys
+from decimal import Decimal
 
 # Configure logging
 logging.basicConfig(
@@ -409,34 +410,37 @@ def recharge_wallet():
     data = request.get_json()
     admin_id = data.get('admin_id')
     rider_id = data.get('rider_id')
-    amount = data.get('amount')
+    amount_raw = data.get('amount')
     description = data.get('description', 'Wallet Recharge')
 
-    # Validate inputs
-    if not all([admin_id, rider_id, amount]):
+    if not all([admin_id, rider_id, amount_raw]):
         return jsonify({'success': False, 'message': 'Invalid data'}), 400
 
     try:
-        amount = float(amount)  # ✅ Force amount to be a float
+        # Convert string/float to Decimal for safety
+        amount = Decimal(str(amount_raw))
         if amount <= 0:
             return jsonify({'success': False, 'message': 'Amount must be positive'}), 400
-    except ValueError:
+    except:
         return jsonify({'success': False, 'message': 'Invalid amount format'}), 400
 
     connection = get_db_connection()
     try:
         cursor = connection.cursor()
 
-        # 1. Get Rider Wallet
+        # 1. Ensure Wallet Exists
         wallet = get_or_create_wallet(cursor, rider_id)
 
-        # 2. Add Balance
-        # ✅ FIX: Convert database Decimal to float before adding
-        current_balance = float(wallet['balance'])
-        new_balance = current_balance + amount
+        # 2. Update Balance in SQL (Atomic Update)
+        # We use 'RETURNING balance' to get the new value immediately
+        cursor.execute("""
+            UPDATE wallets 
+            SET balance = balance + %s, last_updated = NOW() 
+            WHERE wallet_id = %s 
+            RETURNING balance
+        """, (amount, wallet['wallet_id']))
 
-        cursor.execute("UPDATE wallets SET balance = %s, last_updated = NOW() WHERE wallet_id = %s",
-                       (new_balance, wallet['wallet_id']))
+        new_balance = cursor.fetchone()['balance']
 
         # 3. Log Transaction
         cursor.execute("""
@@ -446,7 +450,13 @@ def recharge_wallet():
         """, (wallet['wallet_id'], amount, description, admin_id))
 
         connection.commit()
-        return jsonify({'success': True, 'message': 'Wallet recharged successfully', 'new_balance': new_balance})
+
+        # Convert Decimal to float for JSON response
+        return jsonify({
+            'success': True,
+            'message': 'Wallet recharged successfully',
+            'new_balance': float(new_balance)
+        })
 
     except Exception as e:
         connection.rollback()
@@ -463,15 +473,15 @@ def deduct_wallet():
     rider_id = data.get('rider_id')
     category = data.get('category')
     description = data.get('description')
+    amount_raw = data.get('amount')
 
-    # Validate Amount
-    try:
-        amount = float(data.get('amount'))  # ✅ Force amount to float
-    except (TypeError, ValueError):
-        return jsonify({'success': False, 'message': 'Invalid amount'}), 400
-
-    if not all([admin_id, rider_id, category]):
+    if not all([admin_id, rider_id, category, amount_raw]):
         return jsonify({'success': False, 'message': 'Invalid data'}), 400
+
+    try:
+        amount = Decimal(str(amount_raw))
+    except:
+        return jsonify({'success': False, 'message': 'Invalid amount'}), 400
 
     connection = get_db_connection()
     try:
@@ -481,17 +491,12 @@ def deduct_wallet():
         rider_wallet = get_or_create_wallet(cursor, rider_id)
         admin_wallet = get_or_create_wallet(cursor, admin_id)
 
-        # ✅ FIX: Convert database Decimal to float before comparing
-        current_balance = float(rider_wallet['balance'])
-
-        # Optional: Check if rider has enough balance
-        # if current_balance < amount:
-        #      return jsonify({'success': False, 'message': 'Insufficient rider balance'}), 400
-
-        # 2. DEDUCT from Rider
-        # We calculate new balance in Python to be safe, or let SQL handle the math
-        cursor.execute("UPDATE wallets SET balance = balance - %s WHERE wallet_id = %s",
-                       (amount, rider_wallet['wallet_id']))
+        # 2. DEDUCT from Rider (Math in SQL)
+        cursor.execute("""
+            UPDATE wallets 
+            SET balance = balance - %s 
+            WHERE wallet_id = %s
+        """, (amount, rider_wallet['wallet_id']))
 
         # Log Rider Transaction
         cursor.execute("""
@@ -499,9 +504,12 @@ def deduct_wallet():
             VALUES (%s, %s, 'DEBIT', %s, %s, %s)
         """, (rider_wallet['wallet_id'], amount, category, description, admin_id))
 
-        # 3. CREDIT to Admin
-        cursor.execute("UPDATE wallets SET balance = balance + %s WHERE wallet_id = %s",
-                       (amount, admin_wallet['wallet_id']))
+        # 3. CREDIT to Admin (Math in SQL)
+        cursor.execute("""
+            UPDATE wallets 
+            SET balance = balance + %s 
+            WHERE wallet_id = %s
+        """, (amount, admin_wallet['wallet_id']))
 
         # Log Admin Transaction
         cursor.execute("""
