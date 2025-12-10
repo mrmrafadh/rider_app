@@ -412,8 +412,16 @@ def recharge_wallet():
     amount = data.get('amount')
     description = data.get('description', 'Wallet Recharge')
 
-    if not all([admin_id, rider_id, amount]) or float(amount) <= 0:
+    # Validate inputs
+    if not all([admin_id, rider_id, amount]):
         return jsonify({'success': False, 'message': 'Invalid data'}), 400
+
+    try:
+        amount = float(amount)  # ✅ Force amount to be a float
+        if amount <= 0:
+            return jsonify({'success': False, 'message': 'Amount must be positive'}), 400
+    except ValueError:
+        return jsonify({'success': False, 'message': 'Invalid amount format'}), 400
 
     connection = get_db_connection()
     try:
@@ -423,11 +431,12 @@ def recharge_wallet():
         wallet = get_or_create_wallet(cursor, rider_id)
 
         # 2. Add Balance
-        new_balance = wallet['balance'] + (amount)  # Decimal handled by Postgres adapter usually, or ensure float
-        # Note: In production, pass decimals properly. Here we assume float handling.
+        # ✅ FIX: Convert database Decimal to float before adding
+        current_balance = float(wallet['balance'])
+        new_balance = current_balance + amount
 
-        cursor.execute("UPDATE wallets SET balance = balance + %s, last_updated = NOW() WHERE wallet_id = %s",
-                       (amount, wallet['wallet_id']))
+        cursor.execute("UPDATE wallets SET balance = %s, last_updated = NOW() WHERE wallet_id = %s",
+                       (new_balance, wallet['wallet_id']))
 
         # 3. Log Transaction
         cursor.execute("""
@@ -437,7 +446,7 @@ def recharge_wallet():
         """, (wallet['wallet_id'], amount, description, admin_id))
 
         connection.commit()
-        return jsonify({'success': True, 'message': 'Wallet recharged successfully'})
+        return jsonify({'success': True, 'message': 'Wallet recharged successfully', 'new_balance': new_balance})
 
     except Exception as e:
         connection.rollback()
@@ -452,11 +461,16 @@ def deduct_wallet():
     data = request.get_json()
     admin_id = data.get('admin_id')
     rider_id = data.get('rider_id')
-    amount = float(data.get('amount'))
-    category = data.get('category')  # 'COMMISSION', 'SERVICE_CHARGE'
+    category = data.get('category')
     description = data.get('description')
 
-    if not all([admin_id, rider_id, amount, category]):
+    # Validate Amount
+    try:
+        amount = float(data.get('amount'))  # ✅ Force amount to float
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'message': 'Invalid amount'}), 400
+
+    if not all([admin_id, rider_id, category]):
         return jsonify({'success': False, 'message': 'Invalid data'}), 400
 
     connection = get_db_connection()
@@ -467,11 +481,15 @@ def deduct_wallet():
         rider_wallet = get_or_create_wallet(cursor, rider_id)
         admin_wallet = get_or_create_wallet(cursor, admin_id)
 
-        # Check if rider has enough balance (Optional: Allow negative if you want)
-        if float(rider_wallet['balance']) < amount:
-            return jsonify({'success': False, 'message': 'Insufficient rider balance'}), 400
+        # ✅ FIX: Convert database Decimal to float before comparing
+        current_balance = float(rider_wallet['balance'])
+
+        # Optional: Check if rider has enough balance
+        # if current_balance < amount:
+        #      return jsonify({'success': False, 'message': 'Insufficient rider balance'}), 400
 
         # 2. DEDUCT from Rider
+        # We calculate new balance in Python to be safe, or let SQL handle the math
         cursor.execute("UPDATE wallets SET balance = balance - %s WHERE wallet_id = %s",
                        (amount, rider_wallet['wallet_id']))
 
@@ -481,7 +499,7 @@ def deduct_wallet():
             VALUES (%s, %s, 'DEBIT', %s, %s, %s)
         """, (rider_wallet['wallet_id'], amount, category, description, admin_id))
 
-        # 3. CREDIT to Admin (The company earnings)
+        # 3. CREDIT to Admin
         cursor.execute("UPDATE wallets SET balance = balance + %s WHERE wallet_id = %s",
                        (amount, admin_wallet['wallet_id']))
 
