@@ -63,7 +63,17 @@ def close_db_connection(connection, cursor=None):
     if connection:
         connection.close()
 
-
+def get_or_create_wallet(cursor, user_id):
+    """Ensure a wallet exists for the user"""
+    cursor.execute("SELECT wallet_id, balance FROM wallets WHERE user_id = %s", (user_id,))
+    wallet = cursor.fetchone()
+    if not wallet:
+        cursor.execute(
+            "INSERT INTO wallets (user_id, balance) VALUES (%s, 0.00) RETURNING wallet_id, balance",
+            (user_id,)
+        )
+        wallet = cursor.fetchone()
+    return wallet
 # ------------------- REST API Endpoints ------------------- #
 
 @app.route('/api/login', methods=['POST'])
@@ -350,7 +360,146 @@ def get_online_users():
         if connection:
             close_db_connection(connection, cursor)
         return jsonify({'success': False, 'message': f'Server error: {str(e)}'}), 500
+# ------------------- Wallet Transaction End point ------------------- #
 
+@app.route('/api/wallet/details/<int:user_id>', methods=['GET'])
+def get_wallet_details(user_id):
+    connection = get_db_connection()
+    if not connection:
+        return jsonify({'success': False, 'message': 'Database error'}), 500
+
+    try:
+        cursor = connection.cursor()
+
+        # Get Wallet Balance
+        wallet = get_or_create_wallet(cursor, user_id)
+
+        # Get Recent Transactions
+        cursor.execute("""
+            SELECT amount, transaction_type, category, description, created_at 
+            FROM wallet_transactions 
+            WHERE wallet_id = %s 
+            ORDER BY created_at DESC LIMIT 20
+        """, (wallet['wallet_id'],))
+        transactions = cursor.fetchall()
+
+        # Convert datetime objects to string
+        tx_list = []
+        for tx in transactions:
+            t = dict(tx)
+            t['created_at'] = t['created_at'].isoformat()
+            t['amount'] = float(t['amount'])  # Convert Decimal to float for JSON
+            tx_list.append(t)
+
+        return jsonify({
+            'success': True,
+            'balance': float(wallet['balance']),
+            'transactions': tx_list
+        })
+
+    except Exception as e:
+        logger.error(f"Wallet fetch error: {e}")
+        return jsonify({'success': False, 'message': str(e)}), 500
+    finally:
+        close_db_connection(connection)
+
+
+@app.route('/api/wallet/recharge', methods=['POST'])
+def recharge_wallet():
+    data = request.get_json()
+    admin_id = data.get('admin_id')
+    rider_id = data.get('rider_id')
+    amount = data.get('amount')
+    description = data.get('description', 'Wallet Recharge')
+
+    if not all([admin_id, rider_id, amount]) or float(amount) <= 0:
+        return jsonify({'success': False, 'message': 'Invalid data'}), 400
+
+    connection = get_db_connection()
+    try:
+        cursor = connection.cursor()
+
+        # 1. Get Rider Wallet
+        wallet = get_or_create_wallet(cursor, rider_id)
+
+        # 2. Add Balance
+        new_balance = wallet['balance'] + (amount)  # Decimal handled by Postgres adapter usually, or ensure float
+        # Note: In production, pass decimals properly. Here we assume float handling.
+
+        cursor.execute("UPDATE wallets SET balance = balance + %s, last_updated = NOW() WHERE wallet_id = %s",
+                       (amount, wallet['wallet_id']))
+
+        # 3. Log Transaction
+        cursor.execute("""
+            INSERT INTO wallet_transactions 
+            (wallet_id, amount, transaction_type, category, description, performed_by)
+            VALUES (%s, %s, 'CREDIT', 'RECHARGE', %s, %s)
+        """, (wallet['wallet_id'], amount, description, admin_id))
+
+        connection.commit()
+        return jsonify({'success': True, 'message': 'Wallet recharged successfully'})
+
+    except Exception as e:
+        connection.rollback()
+        logger.error(f"Recharge error: {e}")
+        return jsonify({'success': False, 'message': str(e)}), 500
+    finally:
+        close_db_connection(connection)
+
+
+@app.route('/api/wallet/deduct', methods=['POST'])
+def deduct_wallet():
+    data = request.get_json()
+    admin_id = data.get('admin_id')
+    rider_id = data.get('rider_id')
+    amount = float(data.get('amount'))
+    category = data.get('category')  # 'COMMISSION', 'SERVICE_CHARGE'
+    description = data.get('description')
+
+    if not all([admin_id, rider_id, amount, category]):
+        return jsonify({'success': False, 'message': 'Invalid data'}), 400
+
+    connection = get_db_connection()
+    try:
+        cursor = connection.cursor()
+
+        # 1. Get Wallets
+        rider_wallet = get_or_create_wallet(cursor, rider_id)
+        admin_wallet = get_or_create_wallet(cursor, admin_id)
+
+        # Check if rider has enough balance (Optional: Allow negative if you want)
+        if float(rider_wallet['balance']) < amount:
+            return jsonify({'success': False, 'message': 'Insufficient rider balance'}), 400
+
+        # 2. DEDUCT from Rider
+        cursor.execute("UPDATE wallets SET balance = balance - %s WHERE wallet_id = %s",
+                       (amount, rider_wallet['wallet_id']))
+
+        # Log Rider Transaction
+        cursor.execute("""
+            INSERT INTO wallet_transactions (wallet_id, amount, transaction_type, category, description, performed_by)
+            VALUES (%s, %s, 'DEBIT', %s, %s, %s)
+        """, (rider_wallet['wallet_id'], amount, category, description, admin_id))
+
+        # 3. CREDIT to Admin (The company earnings)
+        cursor.execute("UPDATE wallets SET balance = balance + %s WHERE wallet_id = %s",
+                       (amount, admin_wallet['wallet_id']))
+
+        # Log Admin Transaction
+        cursor.execute("""
+            INSERT INTO wallet_transactions (wallet_id, amount, transaction_type, category, description, performed_by)
+            VALUES (%s, %s, 'CREDIT', 'EARNING', %s, %s)
+        """, (admin_wallet['wallet_id'], amount, f"From Rider {rider_id}: {category}", admin_id))
+
+        connection.commit()
+        return jsonify({'success': True, 'message': 'Deduction processed successfully'})
+
+    except Exception as e:
+        connection.rollback()
+        logger.error(f"Deduction error: {e}")
+        return jsonify({'success': False, 'message': str(e)}), 500
+    finally:
+        close_db_connection(connection)
 
 # ------------------- Socket.IO Events ------------------- #
 
