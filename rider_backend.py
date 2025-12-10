@@ -428,30 +428,37 @@ def recharge_wallet():
     try:
         cursor = connection.cursor()
 
+        # --- SECURITY CHECK START ---
+        # Verify that the user performing the action is actually an Admin
+        cursor.execute("SELECT role FROM users WHERE user_id = %s", (admin_id,))
+        performer = cursor.fetchone()
+
+        if not performer or performer['role'] != 'admin':
+            return jsonify({'success': False, 'message': 'Unauthorized: Only admins can perform this action'}), 403
+        # --- SECURITY CHECK END ---
+
         # 1. Ensure Wallet Exists
         wallet = get_or_create_wallet(cursor, rider_id)
 
         # 2. Update Balance in SQL (Atomic Update)
-        # We use 'RETURNING balance' to get the new value immediately
         cursor.execute("""
-            UPDATE wallets 
-            SET balance = balance + %s, last_updated = NOW() 
-            WHERE wallet_id = %s 
-            RETURNING balance
-        """, (amount, wallet['wallet_id']))
+                UPDATE wallets 
+                SET balance = balance + %s, last_updated = NOW() 
+                WHERE wallet_id = %s 
+                RETURNING balance
+            """, (amount, wallet['wallet_id']))
 
         new_balance = cursor.fetchone()['balance']
 
         # 3. Log Transaction
         cursor.execute("""
-            INSERT INTO wallet_transactions 
-            (wallet_id, amount, transaction_type, category, description, performed_by)
-            VALUES (%s, %s, 'CREDIT', 'RECHARGE', %s, %s)
-        """, (wallet['wallet_id'], amount, description, admin_id))
+                INSERT INTO wallet_transactions 
+                (wallet_id, amount, transaction_type, category, description, performed_by)
+                VALUES (%s, %s, 'CREDIT', 'RECHARGE', %s, %s)
+            """, (wallet['wallet_id'], amount, description, admin_id))
 
         connection.commit()
 
-        # Convert Decimal to float for JSON response
         return jsonify({
             'success': True,
             'message': 'Wallet recharged successfully',
@@ -483,9 +490,16 @@ def deduct_wallet():
     except:
         return jsonify({'success': False, 'message': 'Invalid amount'}), 400
 
-    connection = get_db_connection()
+
+        connection = get_db_connection()
     try:
         cursor = connection.cursor()
+        cursor.execute("SELECT role FROM users WHERE user_id = %s", (admin_id,))
+        performer = cursor.fetchone()
+
+        if not performer or performer['role'] != 'admin':
+            return jsonify({'success': False, 'message': 'Unauthorized: Only admins can perform this action'}), 403
+        # --- SECURITY CHECK END ---
 
         # 1. Get Wallets
         rider_wallet = get_or_create_wallet(cursor, rider_id)
