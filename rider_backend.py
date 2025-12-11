@@ -643,6 +643,189 @@ def deduct_wallet():
         if connection:
             connection.close()
 
+
+# Add this endpoint to your rider_backend.py file
+# Place it after the wallet deduction endpoint
+
+@app.route('/api/wallet/admin/withdraw', methods=['POST'])
+def admin_withdraw():
+    """Process admin withdrawal request"""
+    data = request.get_json()
+    admin_id = data.get('admin_id')
+    amount_raw = data.get('amount')
+    method = data.get('method')
+    account_details = data.get('account_details')
+    notes = data.get('notes', '')
+
+    # 1. Validate inputs
+    if not all([admin_id, amount_raw, method, account_details]):
+        return jsonify({'success': False, 'message': 'Missing required fields'}), 400
+
+    # 2. Validate Amount Format
+    try:
+        amount = Decimal(str(amount_raw))
+        if amount <= 0:
+            return jsonify({'success': False, 'message': 'Amount must be positive'}), 400
+    except:
+        return jsonify({'success': False, 'message': 'Invalid amount format'}), 400
+
+    connection = None
+    cursor = None
+
+    try:
+        connection = get_db_connection()
+        if not connection:
+            return jsonify({'success': False, 'message': 'Database connection failed'}), 500
+
+        cursor = connection.cursor()
+
+        # 3. Security Check (Is user an Admin?)
+        cursor.execute("SELECT role FROM users WHERE user_id = %s", (admin_id,))
+        performer = cursor.fetchone()
+
+        if not performer or performer['role'] != 'admin':
+            return jsonify({'success': False, 'message': 'Unauthorized: Only admins can perform this action'}), 403
+
+        # 4. Get Admin Wallet
+        admin_wallet = get_or_create_wallet(cursor, admin_id)
+
+        # 5. Check Sufficient Balance
+        if admin_wallet['balance'] < amount:
+            return jsonify({'success': False, 'message': 'Insufficient balance'}), 400
+
+        # 6. Deduct from Admin Wallet
+        cursor.execute("""
+            UPDATE wallets 
+            SET balance = balance - %s, last_updated = NOW()
+            WHERE wallet_id = %s
+            RETURNING balance
+        """, (amount, admin_wallet['wallet_id']))
+
+        new_balance = cursor.fetchone()['balance']
+
+        # 7. Log Withdrawal Transaction
+        withdrawal_description = f"Withdrawal via {method} to {account_details}"
+        if notes:
+            withdrawal_description += f" - {notes}"
+
+        cursor.execute("""
+            INSERT INTO wallet_transactions 
+            (wallet_id, amount, transaction_type, category, description, performed_by)
+            VALUES (%s, %s, 'DEBIT', 'WITHDRAWAL', %s, %s)
+            RETURNING transaction_id
+        """, (admin_wallet['wallet_id'], amount, withdrawal_description, admin_id))
+
+        transaction_id = cursor.fetchone()['transaction_id']
+
+        # 8. Optional: Create withdrawal request record for tracking/approval
+        # You can add a separate 'withdrawal_requests' table if needed
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS withdrawal_requests (
+                request_id SERIAL PRIMARY KEY,
+                user_id INTEGER REFERENCES users(user_id),
+                amount DECIMAL(10, 2) NOT NULL,
+                method VARCHAR(50) NOT NULL,
+                account_details VARCHAR(255) NOT NULL,
+                notes TEXT,
+                status VARCHAR(20) DEFAULT 'PENDING',
+                transaction_id INTEGER REFERENCES wallet_transactions(transaction_id),
+                created_at TIMESTAMP DEFAULT NOW(),
+                processed_at TIMESTAMP
+            )
+        """)
+
+        cursor.execute("""
+            INSERT INTO withdrawal_requests 
+            (user_id, amount, method, account_details, notes, status, transaction_id)
+            VALUES (%s, %s, %s, %s, %s, 'COMPLETED', %s)
+        """, (admin_id, amount, method, account_details, notes, transaction_id))
+
+        connection.commit()
+
+        logger.info(f"✅ Admin {admin_id} withdrawal successful: {amount} via {method}")
+
+        return jsonify({
+            'success': True,
+            'message': 'Withdrawal request submitted successfully',
+            'new_balance': float(new_balance),
+            'transaction_id': transaction_id
+        }), 200
+
+    except Exception as e:
+        if connection:
+            connection.rollback()
+        logger.error(f"Admin withdrawal error: {e}")
+        return jsonify({'success': False, 'message': f"Server Error: {str(e)}"}), 500
+
+    finally:
+        if cursor:
+            cursor.close()
+        if connection:
+            connection.close()
+
+
+# Optional: Add endpoint to get withdrawal history
+@app.route('/api/wallet/admin/withdrawals/<int:admin_id>', methods=['GET'])
+def get_admin_withdrawals(admin_id):
+    """Get admin withdrawal history"""
+    connection = None
+    cursor = None
+
+    try:
+        connection = get_db_connection()
+        if not connection:
+            return jsonify({'success': False, 'message': 'Database connection failed'}), 500
+
+        cursor = connection.cursor()
+
+        # Security check
+        cursor.execute("SELECT role FROM users WHERE user_id = %s", (admin_id,))
+        user = cursor.fetchone()
+
+        if not user or user['role'] != 'admin':
+            return jsonify({'success': False, 'message': 'Unauthorized'}), 403
+
+        # Get withdrawal requests
+        cursor.execute("""
+            SELECT 
+                request_id,
+                amount,
+                method,
+                account_details,
+                notes,
+                status,
+                created_at,
+                processed_at
+            FROM withdrawal_requests
+            WHERE user_id = %s
+            ORDER BY created_at DESC
+            LIMIT 50
+        """, (admin_id,))
+
+        withdrawals = cursor.fetchall()
+        close_db_connection(connection, cursor)
+
+        withdrawal_list = []
+        for w in withdrawals:
+            w_dict = dict(w)
+            w_dict['amount'] = float(w_dict['amount'])
+            if w_dict['created_at']:
+                w_dict['created_at'] = w_dict['created_at'].isoformat()
+            if w_dict['processed_at']:
+                w_dict['processed_at'] = w_dict['processed_at'].isoformat()
+            withdrawal_list.append(w_dict)
+
+        return jsonify({
+            'success': True,
+            'withdrawals': withdrawal_list
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Get withdrawals error: {e}")
+        if connection:
+            close_db_connection(connection, cursor)
+        return jsonify({'success': False, 'message': f'Server error: {str(e)}'}), 500
+
 # ------------------- Socket.IO Events ------------------- #
 
 @socketio.on('connect')
