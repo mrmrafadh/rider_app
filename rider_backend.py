@@ -482,50 +482,64 @@ def deduct_wallet():
     description = data.get('description')
     amount_raw = data.get('amount')
 
+    # 1. Validate inputs
     if not all([admin_id, rider_id, category, amount_raw]):
-        return jsonify({'success': False, 'message': 'Invalid data'}), 400
+        return jsonify({'success': False, 'message': 'Invalid data: Missing required fields'}), 400
 
+    # 2. Validate Amount Format
     try:
         amount = Decimal(str(amount_raw))
+        if amount <= 0:
+            return jsonify({'success': False, 'message': 'Amount must be positive'}), 400
     except:
-        return jsonify({'success': False, 'message': 'Invalid amount'}), 400
+        return jsonify({'success': False, 'message': 'Invalid amount format'}), 400
 
+    connection = None
+    cursor = None
 
-        connection = get_db_connection()
     try:
+        connection = get_db_connection()
+        if not connection:
+            return jsonify({'success': False, 'message': 'Database connection failed'}), 500
+
         cursor = connection.cursor()
+
+        # 3. Security Check (Is user an Admin?)
         cursor.execute("SELECT role FROM users WHERE user_id = %s", (admin_id,))
         performer = cursor.fetchone()
 
         if not performer or performer['role'] != 'admin':
             return jsonify({'success': False, 'message': 'Unauthorized: Only admins can perform this action'}), 403
-        # --- SECURITY CHECK END ---
 
-        # 1. Get Wallets
+        # 4. Get Wallets (Create if they don't exist)
         rider_wallet = get_or_create_wallet(cursor, rider_id)
         admin_wallet = get_or_create_wallet(cursor, admin_id)
 
-        # 2. DEDUCT from Rider (Math in SQL)
+        # Check if rider has enough balance (Optional - remove if negative balance is allowed)
+        # if rider_wallet['balance'] < amount:
+        #    return jsonify({'success': False, 'message': 'Insufficient rider balance'}), 400
+
+        # 5. DEDUCT from Rider
         cursor.execute("""
             UPDATE wallets 
-            SET balance = balance - %s 
+            SET balance = balance - %s, last_updated = NOW()
             WHERE wallet_id = %s
         """, (amount, rider_wallet['wallet_id']))
 
-        # Log Rider Transaction
+        # Log Rider Transaction (DEBIT)
         cursor.execute("""
             INSERT INTO wallet_transactions (wallet_id, amount, transaction_type, category, description, performed_by)
             VALUES (%s, %s, 'DEBIT', %s, %s, %s)
         """, (rider_wallet['wallet_id'], amount, category, description, admin_id))
 
-        # 3. CREDIT to Admin (Math in SQL)
+        # 6. CREDIT to Admin
         cursor.execute("""
             UPDATE wallets 
-            SET balance = balance + %s 
+            SET balance = balance + %s, last_updated = NOW()
             WHERE wallet_id = %s
         """, (amount, admin_wallet['wallet_id']))
 
-        # Log Admin Transaction
+        # Log Admin Transaction (CREDIT)
         cursor.execute("""
             INSERT INTO wallet_transactions (wallet_id, amount, transaction_type, category, description, performed_by)
             VALUES (%s, %s, 'CREDIT', 'EARNING', %s, %s)
@@ -535,11 +549,18 @@ def deduct_wallet():
         return jsonify({'success': True, 'message': 'Deduction processed successfully'})
 
     except Exception as e:
-        connection.rollback()
+        if connection:
+            connection.rollback()
         logger.error(f"Deduction error: {e}")
-        return jsonify({'success': False, 'message': str(e)}), 500
+        # Return JSON error instead of HTML
+        return jsonify({'success': False, 'message': f"Server Error: {str(e)}"}), 500
+
     finally:
-        close_db_connection(connection)
+        # Always close connection
+        if cursor:
+            cursor.close()
+        if connection:
+            connection.close()
 
 # ------------------- Socket.IO Events ------------------- #
 
