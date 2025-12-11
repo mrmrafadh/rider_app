@@ -361,6 +361,87 @@ def get_online_users():
         if connection:
             close_db_connection(connection, cursor)
         return jsonify({'success': False, 'message': f'Server error: {str(e)}'}), 500
+
+
+# Add this endpoint to your rider_backend.py file
+# Place it after the existing /api/riders/online endpoint
+
+@app.route('/api/riders/all', methods=['GET'])
+def get_all_riders():
+    """Get all riders (both online and offline) with their wallet balances"""
+    connection = None
+    cursor = None
+    try:
+        connection = get_db_connection()
+        if not connection:
+            return jsonify({'success': False, 'message': 'Database connection failed'}), 500
+
+        cursor = connection.cursor()
+
+        # Get all riders with their status, location, and wallet balance
+        cursor.execute("""
+            SELECT
+                u.user_id,
+                u.username,
+                u.role,
+                COALESCE(rs.is_online, FALSE) as is_online,
+                rs.last_updated,
+                rl_latest.latitude,
+                rl_latest.longitude,
+                rl_latest.location_time as last_location_time,
+                COALESCE(w.balance, 0.00) as balance
+            FROM users u
+            LEFT JOIN rider_status rs ON u.user_id = rs.user_id
+            LEFT JOIN LATERAL (
+                SELECT latitude, longitude, location_time
+                FROM rider_location
+                WHERE user_id = u.user_id
+                ORDER BY location_time DESC
+                LIMIT 1
+            ) rl_latest ON TRUE
+            LEFT JOIN wallets w ON u.user_id = w.user_id
+            WHERE u.role = 'rider'
+            ORDER BY rs.is_online DESC, u.username ASC
+        """)
+
+        riders = cursor.fetchall()
+        close_db_connection(connection, cursor)
+
+        riders_list = []
+        for rider in riders:
+            r_dict = dict(rider)
+            # Map new DB columns to expected Frontend JSON keys
+            r_dict['rider_id'] = r_dict['user_id']
+            r_dict['rider_name'] = r_dict['username']
+
+            # Convert Decimal/float values
+            if r_dict['latitude'] is not None:
+                r_dict['latitude'] = float(r_dict['latitude'])
+            if r_dict['longitude'] is not None:
+                r_dict['longitude'] = float(r_dict['longitude'])
+            if r_dict['balance'] is not None:
+                r_dict['balance'] = float(r_dict['balance'])
+
+            # Convert datetime to ISO string
+            if r_dict['last_updated']:
+                r_dict['last_updated'] = r_dict['last_updated'].isoformat()
+            if r_dict['last_location_time']:
+                r_dict['last_location_time'] = r_dict['last_location_time'].isoformat()
+
+            riders_list.append(r_dict)
+
+        return jsonify({
+            'success': True,
+            'count': len(riders_list),
+            'riders': riders_list
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Get all riders error: {e}")
+        if connection:
+            close_db_connection(connection, cursor)
+        return jsonify({'success': False, 'message': f'Server error: {str(e)}'}), 500
+
 # ------------------- Wallet Transaction End point ------------------- #
 
 @app.route('/api/wallet/details/<int:user_id>', methods=['GET'])
